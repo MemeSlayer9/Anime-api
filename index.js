@@ -1,10 +1,14 @@
-require('dotenv').config();
+import 'dotenv/config';
 
-const express = require('express');
-const cors = require('cors');
+import express from 'express';
+import cors from 'cors';
 
-const animeyubiProvider = require('./providers/animeyubi');
-const auth = require('./middleware/auth');
+import animeyubiProvider from './providers/Anime/animeyubi.js';
+import kissanimeProvider from './providers/Anime/kissanime.js';
+import anime123Provider  from './providers/Anime/123Anime.js';
+import animedaoProvider  from './providers/Anime/animedao.js';
+import auth from './middleware/auth.js';
+import supabase from './supabaseClient.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -15,10 +19,13 @@ app.use(express.json());
 app.get('/', (req, res) => {
   res.json({
     message: 'Anime Scraper API',
-    version: '1.0.0',
+    version: '1.2.0',
     providers: {
-      animeyubi: { base: '/anime/animeyubi' },
-    }
+      animeyubi:  { base: '/anime/animeyubi' },
+      kissanime:  { base: '/anime/kissanime' },
+      '123anime': { base: '/anime/123anime' },
+      animedao:   { base: '/anime/animedao' },
+    },
   });
 });
 
@@ -34,8 +41,6 @@ app.get('/validate-key', async (req, res) => {
       message: 'Missing API key' 
     });
   }
-
-  const supabase = require('./supabaseClient');
 
   const { data, error } = await supabase
     .from('api_keys')
@@ -58,21 +63,24 @@ app.get('/validate-key', async (req, res) => {
   });
 });
 
-// 🔒 Protected
+// 🔒 Protected routes
 app.use('/anime/animeyubi', auth, animeyubiProvider);
+app.use('/anime/kissanime', auth, kissanimeProvider);
+app.use('/anime/123anime',  auth, anime123Provider);
+app.use('/anime/animedao',  auth, animedaoProvider);
 
 app.get('/health', (req, res) => {
   res.json({
     status: 'OK',
     timestamp: new Date().toISOString(),
-    providers: ['animeyubi']
+    providers: ['animeyubi', 'kissanime', '123animes', 'animedao'],
   });
 });
 
 app.use((req, res) => {
   res.status(404).json({
     error: 'Not Found',
-    message: `Route ${req.method} ${req.path} not found`
+    message: `Route ${req.method} ${req.path} not found`,
   });
 });
 
@@ -80,7 +88,7 @@ app.use((err, req, res, next) => {
   console.error('Error:', err);
   res.status(500).json({
     error: 'Internal Server Error',
-    message: err.message
+    message: err.message,
   });
 });
 
@@ -90,7 +98,8 @@ process.on('unhandledRejection', (error) => {
 
 app.listen(PORT, () => {
   console.log(`🚀 Anime Scraper API running on http://localhost:${PORT}`);
-  console.log(`🔒 /anime/animeyubi is protected`);
+  console.log(`🔒 All /anime/* routes are protected`);
+  console.log(`📺 AnimeDAO provider → /anime/animedao`);
 });
 
-module.exports = app;
+export default app;
