@@ -1,4 +1,4 @@
-require('dotenv').config();
+// No require('dotenv').config() needed on Vercel!
 const { createClient } = require('@supabase/supabase-js');
 
 const supabase = createClient(
