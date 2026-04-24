@@ -60,9 +60,10 @@ function toAbsolute(url, baseDir) {
   return baseDir + url;
 }
 
-function rewriteM3u8(content, originalUrl, proxyBase) {
+function rewriteM3u8(content, originalUrl, proxyBase, apiKey) {
   const base = new URL(originalUrl);
   const baseDir = base.origin + base.pathname.replace(/\/[^/]*$/, '/');
+  const keyParam = apiKey ? `&apiKey=${encodeURIComponent(apiKey)}` : '';
 
   return content
     .split('\n')
@@ -73,16 +74,16 @@ function rewriteM3u8(content, originalUrl, proxyBase) {
       if (trimmed.startsWith('#')) {
         return line.replace(/URI="([^"]+)"/g, (_, uri) => {
           const absolute = toAbsolute(uri, baseDir);
-          return `URI="${proxyBase}/anime/animedao/proxy/segment?url=${encodeURIComponent(absolute)}"`;
+          return `URI="${proxyBase}/anime/animedao/proxy/segment?url=${encodeURIComponent(absolute)}${keyParam}"`;
         });
       }
 
       const absolute = toAbsolute(trimmed, baseDir);
 
       if (/\.m3u8(\?|$)/.test(absolute)) {
-        return `${proxyBase}/anime/animedao/proxy/m3u8?url=${encodeURIComponent(absolute)}`;
+        return `${proxyBase}/anime/animedao/proxy/m3u8?url=${encodeURIComponent(absolute)}${keyParam}`;
       }
-      return `${proxyBase}/anime/animedao/proxy/segment?url=${encodeURIComponent(absolute)}`;
+      return `${proxyBase}/anime/animedao/proxy/segment?url=${encodeURIComponent(absolute)}${keyParam}`;
     })
     .join('\n');
 }
@@ -179,10 +180,13 @@ async function getAllQualities(masterUrl) {
   }
 }
 
-async function buildStreamEntry(s, proxyBase) {
+async function buildStreamEntry(s, proxyBase, apiKey) {
+  const keyParam = apiKey ? `&apiKey=${encodeURIComponent(apiKey)}` : '';
   const qualities = await getAllQualities(s.m3u8);
-  const proxiedM3u8 = `${proxyBase}/anime/animedao/proxy/m3u8?url=${encodeURIComponent(s.m3u8)}`;
-  const playerBase = `${proxyBase}/anime/animedao/player?url=${proxiedM3u8}`;
+  const proxiedM3u8 = `${proxyBase}/anime/animedao/proxy/m3u8?url=${encodeURIComponent(s.m3u8)}${keyParam}`;
+
+  // ✅ encodeURIComponent the full proxiedM3u8 so &apiKey doesn't break the player's query string
+  const playerBase = `${proxyBase}/anime/animedao/player?url=${encodeURIComponent(proxiedM3u8)}`;
   const player = s.subtitle ? `${playerBase}&sub=${encodeURIComponent(s.subtitle)}` : playerBase;
 
   return {
@@ -193,8 +197,10 @@ async function buildStreamEntry(s, proxyBase) {
     original: s.m3u8,
     subtitle: s.subtitle,
     qualities: qualities.map((q) => {
-      const proxied = `${proxyBase}/anime/animedao/proxy/m3u8?url=${encodeURIComponent(q.original)}`;
-      const pBase = `${proxyBase}/anime/animedao/player?url=${proxied}`;
+      const proxied = `${proxyBase}/anime/animedao/proxy/m3u8?url=${encodeURIComponent(q.original)}${keyParam}`;
+
+      // ✅ same fix for per-quality player links
+      const pBase = `${proxyBase}/anime/animedao/player?url=${encodeURIComponent(proxied)}`;
       const pPlayer = s.subtitle ? `${pBase}&sub=${encodeURIComponent(s.subtitle)}` : pBase;
       return {
         label: q.label,
@@ -219,9 +225,9 @@ async function buildStreamEntry(s, proxyBase) {
 function toAnimeSlug(title) {
   return title
     .toLowerCase()
-    .replace(/['']/g, '')           // drop apostrophes / curly quotes
-    .replace(/[^a-z0-9]+/g, '-')   // non-alphanum → dash
-    .replace(/^-+|-+$/g, '');      // trim leading/trailing dashes
+    .replace(/['']/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
 }
 
 /**
@@ -413,7 +419,6 @@ router.get('/recent', async (req, res) => {
 /**
  * GET /anime/animedao/episodes/:animeSlug
  * Returns all episodes for a given anime slug.
- * Example: /anime/animedao/episodes/one-piece
  */
 router.get('/episodes/:animeSlug', async (req, res) => {
   const { animeSlug } = req.params;
@@ -474,10 +479,10 @@ router.get('/episodes/:animeSlug', async (req, res) => {
 /**
  * GET /anime/animedao/source/:watchSlug
  * Returns stream sources (SUB / DUB / HSUB) for a given episode slug.
- * Example: /anime/animedao/source/one-piece-episode-2
  */
 router.get('/source/:watchSlug', async (req, res) => {
   const { watchSlug } = req.params;
+  const apiKey = req.query.apiKey;
 
   const candidates = [
     watchUrlCache.get(watchSlug),
@@ -548,7 +553,7 @@ router.get('/source/:watchSlug', async (req, res) => {
 
   await Promise.all(
     Object.entries(categories).map(async ([cat, servers]) => {
-      result[cat] = await Promise.all(servers.map((s) => buildStreamEntry(s, proxyBase)));
+      result[cat] = await Promise.all(servers.map((s) => buildStreamEntry(s, proxyBase, apiKey)));
     })
   );
 
@@ -557,15 +562,7 @@ router.get('/source/:watchSlug', async (req, res) => {
 
 /**
  * GET /anime/animedao/details/:anilistId
- *
  * Returns full AniList + TMDB metadata merged with the AnimeDAO episode list.
- * TMDB per-episode data (thumbnail, overview, airDate, rating) is injected
- * into each animedao episode entry when available.
- *
- * The anime slug is auto-resolved by trying the english title, romaji title,
- * and any AniList synonyms as slug candidates against animedao.
- *
- * Example: /anime/animedao/details/21   (21 = One Piece on AniList)
  */
 router.get('/details/:anilistId', async (req, res) => {
   const anilistId = parseInt(req.params.anilistId, 10);
@@ -600,11 +597,9 @@ router.get('/details/:anilistId', async (req, res) => {
   const { tmdbId, tmdbInfo, tmdbLookup } = tmdbResult;
 
   // ── 3. Merge TMDB per-episode metadata into animedao episodes ─────────────
-  //       tmdbLookup is keyed by absolute episode number (1-based integer)
   const episodes = (episodeResult?.episodes || []).map((ep) => {
     const tmdbEp = ep.episode != null ? tmdbLookup.get(ep.episode) : undefined;
     return {
-      // AnimeDAO fields
       id:            ep.id,
       episodeId:     ep.episodeId,
       episode:       ep.episode,
@@ -613,7 +608,6 @@ router.get('/details/:anilistId', async (req, res) => {
       date:          ep.date,
       watchUrl:      ep.watchUrl,
       streamUrl:     ep.streamUrl,
-      // TMDB enrichment (null when unavailable)
       tmdbTitle:     tmdbEp?.title         || null,
       overview:      tmdbEp?.overview      || null,
       airDate:       tmdbEp?.airDate       || null,
@@ -627,7 +621,6 @@ router.get('/details/:anilistId', async (req, res) => {
 
   // ── 4. Return combined response ───────────────────────────────────────────
   res.json({
-    // ── Series metadata (AniList) ──
     id:              media.id,
     title:           media.title,
     description:     media.description,
@@ -646,8 +639,6 @@ router.get('/details/:anilistId', async (req, res) => {
     characters:      media.characters,
     recommendations: media.recommendations,
     relations:       media.relations,
-
-    // ── Series metadata (TMDB) ──
     tmdbId,
     tmdb: tmdbInfo
       ? {
@@ -663,8 +654,6 @@ router.get('/details/:anilistId', async (req, res) => {
           seasons:       tmdbInfo.seasons,
         }
       : null,
-
-    // ── AnimeDAO episode list (enriched with TMDB per-episode data) ──
     animeDAOSlug:  episodeResult?.slug  || null,
     totalEpisodes: episodes.length      || media.totalEpisodes || null,
     episodes,
@@ -672,18 +661,18 @@ router.get('/details/:anilistId', async (req, res) => {
 });
 
 /**
- * GET /anime/animedao/proxy/m3u8?url=<m3u8-url>
+ * GET /anime/animedao/proxy/m3u8?url=<m3u8-url>&apiKey=<key>
  * Proxies and rewrites m3u8 playlists so all segment/key URIs go through this server.
  */
 router.get('/proxy/m3u8', async (req, res) => {
-  const { url } = req.query;
+  const { url, apiKey } = req.query;
   if (!url) return res.status(400).send('Missing ?url=');
 
   const proxyBase = `${req.protocol}://${req.get('host')}`;
 
   try {
     const response = await axios.get(url, { headers: HEADERS, responseType: 'text' });
-    const rewritten = rewriteM3u8(response.data, url, proxyBase);
+    const rewritten = rewriteM3u8(response.data, url, proxyBase, apiKey);
 
     res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
     res.setHeader('Cache-Control', 'no-cache');
@@ -695,7 +684,7 @@ router.get('/proxy/m3u8', async (req, res) => {
 });
 
 /**
- * GET /anime/animedao/proxy/segment?url=<segment-url>
+ * GET /anime/animedao/proxy/segment?url=<segment-url>&apiKey=<key>
  * Proxies raw media segments (.ts, encryption keys, init segments).
  */
 router.get('/proxy/segment', async (req, res) => {
@@ -716,11 +705,13 @@ router.get('/proxy/segment', async (req, res) => {
 /**
  * GET /anime/animedao/player?url=<proxied-m3u8>&sub=<vtt-url>
  * Built-in HLS player with quality selector and optional subtitle track.
- * NOTE: This route is intentionally NOT behind auth so it can be embedded in <video>.
  */
 router.get('/player', (req, res) => {
-  const { url, sub } = req.query;
+  const { url, sub, apiKey } = req.query;  // ← grab apiKey
   if (!url) return res.status(400).send('Missing ?url=');
+
+  // Re-attach apiKey to the proxied m3u8 URL so the proxy forwards it into segments
+  const m3u8Url = apiKey ? `${url}&apiKey=${encodeURIComponent(apiKey)}` : url;
 
   const subTrack = sub
     ? `<track kind="subtitles" src="${sub}" srclang="en" label="English" default>`
@@ -755,7 +746,7 @@ router.get('/player', (req, res) => {
     <select id="qualitySelect"><option value="-1">Auto</option></select>
   </div>
   <script>
-    const src   = decodeURIComponent("${encodeURIComponent(url)}");
+    const src   = decodeURIComponent("${encodeURIComponent(m3u8Url)}");  // ← use m3u8Url
     const video = document.getElementById("video");
     const sel   = document.getElementById("qualitySelect");
 

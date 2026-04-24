@@ -331,7 +331,6 @@ function parseTagAttrs(line) {
 
 async function resolveAnilistIdFromSlug(slug) {
   try {
-    // Strip the hex suffix (e.g. "marriagetoxin-a521" → "marriage toxin")
     const title = slug
       .replace(/-[0-9a-f]{4,8}$/i, "")
       .replace(/-/g, " ")
@@ -559,7 +558,6 @@ async function fetchKaaEpisodes(showSlug, lang = "ja-JP", page = 1) {
   return { language: langInPage, subDub: subDubOptions, totalEps, pageRanges, episodes };
 }
 
-// ─── Enrich sparse API results with per-show detail ───────────────────────────
 function mapRecentUpdate(item) {
   let poster = null;
   if (item.poster && typeof item.poster === "object") {
@@ -572,14 +570,11 @@ function mapRecentUpdate(item) {
   const locales   = Array.isArray(item.locales) ? item.locales : [];
   const languages = [...new Set(locales.map(l => localeMap[l] || l).filter(Boolean))];
 
-  // episode_number is the latest ep number — directly on the item
   const latestEp = item.episode_number ?? null;
 
-  // watch_uri: "/slug/ep-3-xxxxx" → extract ep slug
   const epSlugMatch  = (item.watch_uri || "").match(/\/(ep-[^/]+)$/);
   const latestEpSlug = epSlugMatch ? epSlugMatch[1] : (latestEp ? `ep-${latestEp}` : null);
 
-  // slug from watch_uri: "/i-became-friends-.../ep-3-..." → first segment
   const slugMatch = (item.watch_uri || "").match(/^\/([^/]+)\//);
   const slug      = item.slug || (slugMatch ? slugMatch[1] : null);
 
@@ -597,7 +592,6 @@ function mapRecentUpdate(item) {
   };
 }
 
-// ─── Shape normalizer ─────────────────────────────────────────────────────────
 function mapShow(item) {
   let poster = null;
   if (item.poster && typeof item.poster === "object") {
@@ -612,7 +606,6 @@ function mapShow(item) {
   const locales   = Array.isArray(item.locales) ? item.locales : [];
   const languages = [...new Set(locales.map(l => localeMap[l] || l).filter(Boolean))];
 
-  // these come pre-resolved from getLatestEp()
   const latestEp     = item.latestEp     ?? null;
   const latestEpSlug = item.latestEpSlug ?? null;
 
@@ -630,13 +623,13 @@ function mapShow(item) {
   };
 }
 
-// ─── Lang helpers ─────────────────────────────────────────────────────────────
 function langToApiParam(lang) {
   return { sub: "ja-JP", dub: "en-US", chinese: "zh-CN" }[lang] || null;
 }
+
 function filterByLang(lang) {
   if (lang === "all") return () => true;
-  const want = lang.toLowerCase(); // "sub", "dub", "chinese"
+  const want = lang.toLowerCase();
   return (show) => {
     if (!show.languages || show.languages.length === 0) return false;
     return show.languages.some(l => l.toLowerCase() === want);
@@ -652,7 +645,6 @@ async function getLatestEp(slug) {
     });
     const eps = Array.isArray(data) ? data : (data.result || data.episodes || data.items || []);
     if (!eps.length) return { latestEp: null, latestEpSlug: null };
-    // episodes are sorted ascending — last one is latest
     const last = eps[eps.length - 1];
     const epSlugMatch = (last.slug || "").match(/^(ep-[^/]+)$/);
     return {
@@ -664,93 +656,68 @@ async function getLatestEp(slug) {
   }
 }
 
-
-
-// ─── HTML parser (for POST body or ?html= fallback) ──────────────────────────
 function parseKaaHtml(html, langFilter = "all") {
   const $ = cheerio.load(html);
   const shows = [];
   const seen  = new Set();
- 
+
   $(".show-item").each((_, card) => {
     const $card = $(card);
- 
-    // ── slug ──────────────────────────────────────────────────────────────────
+
     let slug = null;
- 
-    // Card <a> href: e.g. "/tongari-boushi-no-atelier-9824/ep-4-a1f4bc"
+
     const cardHref  = $card.find("a.v-card").first().attr("href") || "";
     const cardMatch = cardHref.match(/^\/([a-z0-9][a-z0-9-]+-[0-9a-f]{4,8})(?:\/|$)/i);
     if (cardMatch) slug = cardMatch[1];
- 
-    // Title <a> href: may be relative WITHOUT leading slash
-    // e.g. href="tongari-boushi-no-atelier-9824"
+
     if (!slug) {
       const titleHref  = $card.find(".show-title a").first().attr("href") || "";
-      // strip optional leading slash, then match the full slug
       const titleMatch = titleHref.replace(/^\//, "")
         .match(/^([a-z0-9][a-z0-9-]+-[0-9a-f]{4,8})(?:\/|$)?$/i);
       if (titleMatch) slug = titleMatch[1];
     }
- 
+
     if (!slug || seen.has(slug)) return;
     seen.add(slug);
- 
-    // ── title ─────────────────────────────────────────────────────────────────
-    const title = $card.find(".show-title a span").first().text().trim() || null;
- 
-    // ── poster ────────────────────────────────────────────────────────────────
-    // The raw style attr looks like:
-    //   background-image: url("__https://kaa.lt/image/poster/foo-hq.webp__;");
-    // OR the normal:
-    //   background-image: url("https://kaa.lt/image/poster/foo-hq.webp");
-    // We need to strip leading __ and trailing __; / trailing garbage
-    const bgStyle = $card.find(".v-image__image").first().attr("style") || "";
 
-    // Extract whatever is inside url(...)
+    const title = $card.find(".show-title a span").first().text().trim() || null;
+
+    const bgStyle = $card.find(".v-image__image").first().attr("style") || "";
     const urlMatch = bgStyle.match(/url\(\s*["']?\s*(.*?)\s*["']?\s*\)/);
     let poster = null;
     if (urlMatch) {
       let raw = urlMatch[1].trim();
-      // Strip leading __ prefix and trailing __; or __ suffix added by the site
       raw = raw.replace(/^__+/, "").replace(/__+;?$/, "").trim();
       if (raw.startsWith("//")) raw = "https:" + raw;
       if (raw.startsWith("/")) raw = "https://kaa.lt" + raw;
       if (/^https?:\/\//.test(raw)) poster = raw;
     }
- 
-    // ── chips ─────────────────────────────────────────────────────────────────
+
     const chips = $card.find(".v-chip__content")
       .map((_, el) => $(el).text().trim())
       .get()
       .filter(Boolean);
- 
-    // ── year ──────────────────────────────────────────────────────────────────
+
     const yearChip = chips.find(c => /^\d{4}$/.test(c));
     const year     = yearChip ? parseInt(yearChip, 10) : null;
- 
-    // ── type ──────────────────────────────────────────────────────────────────
+
     const typeChip = chips.find(c => /^(TV|Movie|OVA|ONA|Special)$/i.test(c));
     const type     = typeChip ? typeChip.toUpperCase() : null;
- 
-    // ── latest episode ────────────────────────────────────────────────────────
+
     const epChip   = chips.find(c => /^EP\s*\d+$/i.test(c));
     const latestEp = epChip ? parseInt(epChip.replace(/\D/g, ""), 10) : null;
- 
-    // ── latest episode slug (from card href) ──────────────────────────────────
+
     const epSlugMatch  = cardHref.match(/\/(ep-[^/]+)$/i);
     const latestEpSlug = epSlugMatch ? epSlugMatch[1] : null;
- 
-    // ── language chips ────────────────────────────────────────────────────────
+
     const languages = chips.filter(c => /^(SUB|DUB|Chinese)$/i.test(c));
- 
-    // ── lang filter ───────────────────────────────────────────────────────────
+
     if (langFilter !== "all") {
       const want = langFilter.toLowerCase();
       const has  = languages.some(l => l.toLowerCase() === want);
       if (!has) return;
     }
- 
+
     shows.push({
       slug,
       title,
@@ -763,37 +730,9 @@ function parseKaaHtml(html, langFilter = "all") {
       language: languages.join(", ") || null,
     });
   });
- 
+
   return shows;
 }
- 
- 
-// ─── /browse (replace the existing route) ────────────────────────────────────
-// ─── /browse ─────────────────────────────────────────────────────────────────
- 
-router.get("/debug-home-endpoints", async (req, res) => {
-  const endpoints = [
-    "/api/top_airing",
-    "/api/today_releases", 
-    "/api/recent_update",
-    "/api/trending",
-    "/api/popular",
-    "/api/featured",
-    "/api/home",
-  ];
-
-  const results = await Promise.allSettled(
-    endpoints.map(ep =>
-      axios.get(`https://kaa.lt${ep}`, {
-        params: { page: 1, limit: 10 },
-        headers: { ...HEADERS, Referer: "https://kaa.lt/" },
-        timeout: 8000,
-      }).then(r => ({ endpoint: ep, status: r.status, sample: JSON.stringify(r.data).slice(0, 300) }))
-    )
-  );
-
-  res.json(results.map(r => r.status === "fulfilled" ? r.value : { error: r.reason?.message, endpoint: r.reason?.config?.url }));
-});
 
 // ─── / ───────────────────────────────────────────────────────────────────────
 router.get("/", (req, res) => {
@@ -851,7 +790,7 @@ router.get("/", (req, res) => {
       {
         method: "GET",
         path: "/browse",
-        description: "Browse or search the kaa.lt show listing via JSON API, with HTML fallback.",
+        description: "Browse or search the kaa.lt show listing.",
         params: {
           lang:   "Filter: all | sub | dub | chinese (default: all)",
           page:   "Page number (default: 1)",
@@ -901,6 +840,31 @@ router.get("/debug-api", async (req, res) => {
   });
   res.json(data);
 });
+
+router.get("/debug-home-endpoints", async (req, res) => {
+  const endpoints = [
+    "/api/top_airing",
+    "/api/today_releases",
+    "/api/recent_update",
+    "/api/trending",
+    "/api/popular",
+    "/api/featured",
+    "/api/home",
+  ];
+
+  const results = await Promise.allSettled(
+    endpoints.map(ep =>
+      axios.get(`https://kaa.lt${ep}`, {
+        params: { page: 1, limit: 10 },
+        headers: { ...HEADERS, Referer: "https://kaa.lt/" },
+        timeout: 8000,
+      }).then(r => ({ endpoint: ep, status: r.status, sample: JSON.stringify(r.data).slice(0, 300) }))
+    )
+  );
+
+  res.json(results.map(r => r.status === "fulfilled" ? r.value : { error: r.reason?.message, endpoint: r.reason?.config?.url }));
+});
+
 // ─── /browse ─────────────────────────────────────────────────────────────────
 router.get("/browse", async (req, res) => {
   const lang   = (req.query.lang  || "all").toLowerCase();
@@ -909,38 +873,159 @@ router.get("/browse", async (req, res) => {
   const limit  = parseInt(req.query.limit || "30", 10);
 
   try {
-    let raw = [];
+    let source = "recent_update";
 
     if (search) {
-      for (const params of [{ q: search }, { search }, { keyword: search }]) {
+      // ── Search path ───────────────────────────────────────────────────────
+      source = "search";
+      let raw = [];
+
+      for (const params of [
+        { q: search, page, limit },
+        { search,    page, limit },
+        { keyword: search, page, limit },
+      ]) {
         try {
           const { data } = await axios.get("https://kaa.lt/api/anime", {
-            params: { ...params, page, limit },
+            params,
             headers: { ...HEADERS, Referer: "https://kaa.lt/" },
             timeout: 8000,
           });
-          const items = Array.isArray(data) ? data : (data.result || data.results || data.items || data.data || []);
+          const items = Array.isArray(data)
+            ? data
+            : (data.result || data.results || data.items || data.data || []);
           if (items.length > 0) { raw = items; break; }
         } catch (_) {}
       }
+
+      if (raw.length === 0) {
+        try {
+          const { data: html } = await axios.get(`https://kaa.lt/?q=${encodeURIComponent(search)}`, {
+            headers: { ...HEADERS, Referer: "https://kaa.lt/" },
+            timeout: 8000,
+          });
+          const htmlShows = parseKaaHtml(html, lang);
+          return res.json({
+            lang, search, page,
+            source: "html_search_fallback",
+            count:  htmlShows.length,
+            shows:  htmlShows.slice(0, limit),
+          });
+        } catch (_) {}
+      }
+
+      const shows = raw.map(mapShow).filter(filterByLang(lang)).slice(0, limit);
+      return res.json({ lang, search, page, source, count: shows.length, shows });
+
     } else {
-      const { data } = await axios.get("https://kaa.lt/api/recent_update", {
-        params: { page, limit },
-        headers: { ...HEADERS, Referer: "https://kaa.lt/" },
-        timeout: 8000,
-      });
-      raw = Array.isArray(data) ? data : (data.result || data.results || data.items || data.data || []);
+      // ── Browse path: RSS + recent_update + schedule ───────────────────────
+      const [rssResp, apiResp, schedResp] = await Promise.allSettled([
+        axios.get("https://kaa.lt/api/feed", {
+          headers: { ...HEADERS, Referer: "https://kaa.lt/" },
+          timeout: 12000,
+        }),
+        axios.get("https://kaa.lt/api/recent_update", {
+          headers: { ...HEADERS, Referer: "https://kaa.lt/" },
+          timeout: 8000,
+        }),
+        axios.get("https://kaa.lt/api/schedule", {
+          headers: { ...HEADERS, Referer: "https://kaa.lt/" },
+          timeout: 8000,
+        }),
+      ]);
+
+      const seen = new Map();
+
+      function cleanSlug(slug) {
+        if (!slug) return null;
+        return slug.split("/")[0];
+      }
+
+      function addToSeen(slug, item) {
+        if (!slug) return;
+        if (!seen.has(slug)) {
+          seen.set(slug, item);
+        } else {
+          const e = seen.get(slug);
+          for (const l of (item.languages || [])) {
+            if (!e.languages.includes(l)) {
+              e.languages.push(l);
+              e.language = e.languages.join(", ");
+            }
+          }
+        }
+      }
+
+      // 1. RSS (most recent first)
+      if (rssResp.status === "fulfilled") {
+        const $ = cheerio.load(rssResp.value.data, { xmlMode: true });
+        $("item").each((_, el) => {
+          const link   = $(el).find("link").text().trim();
+          const title  = $(el).find("title").text().trim();
+          const poster = $(el).find("image\\:image").text().trim() || null;
+
+          const linkMatch = link.match(/kaa\.lt\/([a-z0-9][a-z0-9-]+-[0-9a-f]{4,8})\/(ep-[^/]+)/i);
+          if (!linkMatch) return;
+
+          const slug     = linkMatch[1];
+          const epSlug   = linkMatch[2];
+          const latestEp = parseInt((epSlug.match(/ep-(\d+)/) || [])[1] || "0", 10) || null;
+
+          const langMatch = title.match(/\(([^)]*(?:dub|sub)[^)]*)\)/i);
+          const langStr   = (langMatch?.[1] || "").toLowerCase();
+          const isChinese = langStr.includes("chinese") || langStr.includes("mandarin");
+          const isDub     = langStr.includes("dub");
+          const language  = isChinese ? "Chinese" : isDub ? "DUB" : "SUB";
+
+          const cleanTitle = title
+            .replace(/\s*\([^)]*(?:dub|sub|chinese|mandarin)[^)]*\)\s*/gi, "")
+            .replace(/\s*\|\s*EP\s*\d+.*/i, "")
+            .trim();
+
+          addToSeen(slug, {
+            slug, title: cleanTitle, year: null, type: null, status: null,
+            latestEp, latestEpSlug: epSlug, languages: [language], language, poster,
+          });
+        });
+      }
+
+      // 2. recent_update
+      if (apiResp.status === "fulfilled") {
+        const data  = apiResp.value.data;
+        const items = Array.isArray(data) ? data : (data.result || data.results || data.items || data.data || []);
+        for (const item of items.map(mapRecentUpdate)) {
+          const slug = cleanSlug(item.slug);
+          if (!slug) continue;
+          item.slug = slug;
+          addToSeen(slug, item);
+        }
+      }
+
+      // 3. schedule
+      if (schedResp.status === "fulfilled") {
+        const data  = schedResp.value.data;
+        const items = Array.isArray(data) ? data : (data.result || data.results || data.items || data.data || []);
+        for (const item of items) {
+          const slug = cleanSlug(item.slug);
+          if (!slug || seen.has(slug)) continue;
+          const mapped = mapRecentUpdate({ ...item, watch_uri: `/${slug}/ep-1` });
+          mapped.slug = slug;
+          addToSeen(slug, mapped);
+        }
+      }
+
+      const all      = [...seen.values()];
+      const filtered = all.filter(filterByLang(lang));
+      const start    = (page - 1) * limit;
+      const shows    = filtered.slice(start, start + limit);
+
+      return res.json({ lang, search: null, page, source, count: shows.length, shows });
     }
 
-    const shows = raw.map(mapRecentUpdate).filter(filterByLang(lang)).slice(0, limit);
-
-    return res.json({ lang, search: search || null, page, source: "recent_update", count: shows.length, shows });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
-
-
 
 // ─── /episodes/:showSlug ──────────────────────────────────────────────────────
 router.get("/episodes/:showSlug", async (req, res) => {
@@ -1039,22 +1124,17 @@ router.get("/anilist/:anilistId", async (req, res) => {
 // ─── /source/:showSlug/:epSlug ────────────────────────────────────────────────
 router.get("/source/:showSlug/:epSlug", async (req, res) => {
   const { showSlug, epSlug } = req.params;
-    const pageUrl = `https://kaa.lt/${showSlug}/${epSlug}`;
+  const pageUrl = `https://kaa.lt/${showSlug}/${epSlug}`;
 
- const [anilistId, { data: html }] = await Promise.all([
+  const [anilistId, { data: html }] = await Promise.all([
     resolveAnilistIdFromSlug(showSlug),
     axios.get(pageUrl, {
       headers: { ...HEADERS, Referer: "https://kaa.lt/" },
       maxRedirects: 10,
     }),
   ]);
- 
-  try {
-    const { data: html } = await axios.get(pageUrl, {
-      headers: { ...HEADERS, Referer: "https://kaa.lt/" },
-      maxRedirects: 10,
-    });
 
+  try {
     const $ = cheerio.load(html);
     let kaaRaw = "";
     $("script:not([src])").each((_, el) => {
@@ -1139,7 +1219,7 @@ router.get("/source/:showSlug/:epSlug", async (req, res) => {
 
     res.json({
       episodeId: `${showSlug}/${epSlug}`,
-      anilistId,                              
+      anilistId,
       m3u8:    results.flatMap(r => r.m3u8),
       audio:   results.flatMap(r => r.audio),
       video:   results.flatMap(r => r.video),
@@ -1216,6 +1296,8 @@ router.get("/vtt", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ─── /debug-html ──────────────────────────────────────────────────────────────
 router.get("/debug-html", async (req, res) => {
   const { data: html } = await axios.get("https://kaa.lt/", {
     headers: { ...HEADERS, Referer: "https://kaa.lt/" },
@@ -1224,7 +1306,6 @@ router.get("/debug-html", async (req, res) => {
 
   const $ = cheerio.load(html);
 
-  // Log what class names actually exist
   const classes = new Set();
   $("[class]").each((_, el) => {
     const c = $(el).attr("class") || "";
@@ -1240,6 +1321,7 @@ router.get("/debug-html", async (req, res) => {
     rawSnippet: html.slice(0, 2000),
   });
 });
+
 // ─── /debug-master ────────────────────────────────────────────────────────────
 router.get("/debug-master", async (req, res) => {
   const m3u8Url = req.query.url;
