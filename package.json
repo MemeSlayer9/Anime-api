@@ -9,6 +9,9 @@
     "express": "^5.2.1",
     "graphql": "^16.13.2",
     "graphql-request": "^6.1.0",
+      "name": "anime-scrapper",
+       "version": "1.0.0",
+      "type": "module",
     "he": "^1.2.0",
     "string-similarity": "^4.0.4"
   }

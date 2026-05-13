@@ -214,6 +214,11 @@ async function buildStreamEntry(s, proxyBase, apiKey) {
   };
 }
 
+function getProxyBase(req) {
+  const proto = req.headers['x-forwarded-proto']?.split(',')[0].trim() || req.protocol;
+  return `${proto}://${req.get('host')}`;
+}
+
 // ── NEW HELPERS (AniList + TMDB integration) ──────────────────────────────────
 
 /**
@@ -388,8 +393,12 @@ router.get('/recent', async (req, res) => {
       const thumbnail = $(el).find('img').attr('src') || null;
       const date = $(el).find('.front_time').text().trim().replace(/\s+/g, ' ');
 
-      const proxyBase = `${req.protocol}://${req.get('host')}`;
-      const streamUrl = watchSlug
+const proxyBase = (() => {
+  const proto = req.headers['x-forwarded-proto']?.split(',')[0].trim() || req.protocol;
+  return `${proto}://${req.get('host')}`;
+})();
+
+const streamUrl = watchSlug
         ? `${proxyBase}/anime/animedao/source/${watchSlug}`
         : null;
 
@@ -448,7 +457,7 @@ router.get('/episodes/:animeSlug', async (req, res) => {
       const colonIdx = titleRaw.indexOf(':');
       const epTitle = colonIdx !== -1 ? titleRaw.slice(colonIdx + 1).trim() : titleRaw;
 
-      const proxyBase = `${req.protocol}://${req.get('host')}`;
+const proxyBase = `${req.protocol}://${req.get('host')}`;
       const streamUrl = watchSlug
         ? `${proxyBase}/anime/animedao/source/${watchSlug}`
         : null;
@@ -668,7 +677,7 @@ router.get('/proxy/m3u8', async (req, res) => {
   const { url, apiKey } = req.query;
   if (!url) return res.status(400).send('Missing ?url=');
 
-  const proxyBase = `${req.protocol}://${req.get('host')}`;
+  const proxyBase = getProxyBase(req); // ← fix protocol
 
   try {
     const response = await axios.get(url, { headers: HEADERS, responseType: 'text' });
@@ -676,12 +685,14 @@ router.get('/proxy/m3u8', async (req, res) => {
 
     res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
     res.setHeader('Cache-Control', 'no-cache');
+    // CORS already set by middleware at top ✅
     res.send(rewritten);
   } catch (err) {
-    console.error('[animedao] m3u8 proxy error:', err.message);
     res.status(502).send('Failed to fetch m3u8: ' + err.message);
   }
 });
+
+
 
 /**
  * GET /anime/animedao/proxy/segment?url=<segment-url>&apiKey=<key>
@@ -693,6 +704,9 @@ router.get('/proxy/segment', async (req, res) => {
 
   try {
     const response = await axios.get(url, { headers: HEADERS, responseType: 'stream' });
+    
+    // These are critical — without them HLS.js blocks segment fetches
+    res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Content-Type', response.headers['content-type'] || 'video/MP2T');
     res.setHeader('Cache-Control', 'max-age=3600');
     response.data.pipe(res);
@@ -701,6 +715,18 @@ router.get('/proxy/segment', async (req, res) => {
     res.status(502).send('Failed to fetch segment: ' + err.message);
   }
 });
+
+
+router.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS, HEAD');
+  res.setHeader('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Range');
+  res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Content-Type');
+  if (req.method === 'OPTIONS') return res.status(200).end();
+  next();
+});
+
+
 
 /**
  * GET /anime/animedao/player?url=<proxied-m3u8>&sub=<vtt-url>
