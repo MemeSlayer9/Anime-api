@@ -33,6 +33,59 @@ const httpProbe = axios.create({
 // ─── In-memory cache ──────────────────────────────────────────────────────────
 const _cache = new Map();
 
+
+const CDN_HOSTS = [
+  'hlsx3cdn.burntburst45.store',
+];
+
+function isCdnUrl(url) {
+  try {
+    const { hostname } = new URL(url);
+    return CDN_HOSTS.includes(hostname);
+  } catch { return false; }
+}
+
+const CDN_HEADERS = {
+  Referer:           'https://play2.echovideo.ru/',
+  Origin:            'https://play2.echovideo.ru',
+  'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
+  Accept:            '*/*',
+  // ✅ Exclude zstd — Node.js can't decompress it natively
+  'Accept-Encoding': 'gzip, deflate',
+};
+
+function makeProxyUrl(req, absoluteUrl) {
+  const base = `${req.protocol}://${req.get('host')}`;
+
+  // Forward any auth/passthrough params (apiKey, token, etc.)
+  const passthrough = new URLSearchParams();
+  for (const key of ['apiKey', 'token']) {
+    if (req.query[key]) passthrough.set(key, req.query[key]);
+  }
+
+  const qs = passthrough.toString();
+  const suffix = qs ? `&${qs}` : '';
+  return `${base}/anime/123anime/proxy?url=${encodeURIComponent(absoluteUrl)}${suffix}`;
+}
+
+function rewriteM3U8(text, baseUrl, req) {
+  return text.split('\n').map(line => {
+    const trimmed = line.trim();
+    if (!trimmed) return line;
+
+    if (trimmed.startsWith('#')) {
+      return line.replace(/URI="([^"]+)"/g, (_, uri) => {
+        const absolute = uri.startsWith('http') ? uri : new URL(uri, baseUrl).href;
+        return isCdnUrl(absolute) ? `URI="${makeProxyUrl(req, absolute)}"` : `URI="${absolute}"`;
+      });
+    }
+
+    const absolute = trimmed.startsWith('http') ? trimmed : new URL(trimmed, baseUrl).href;
+    return isCdnUrl(absolute) ? makeProxyUrl(req, absolute) : line;
+  }).join('\n');
+}
+
+
 function cacheGet(key) {
   const hit = _cache.get(key);
   if (!hit) return null;
@@ -46,6 +99,7 @@ function cacheSet(key, value, ttlMs = 6 * 60 * 60 * 1000) {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const BASE = 'https://w1.123animes.ru';
+const CDN  = 'https://hlsx3cdn.burntburst45.store';
 
 // ─── Slug helpers ─────────────────────────────────────────────────────────────
 const JP_NUMBER_WORDS = {
@@ -96,7 +150,7 @@ function slugVariations(title) {
 
   const priority = [base, base + '-tv', numeric, numeric + '-tv'];
   const rest = new Set();
-  const dubVariants = new Set(); // ← NEW: collect dub variants separately
+  const dubVariants = new Set();
   const roots = [...new Set([base, numeric])];
 
   for (const root of roots) {
@@ -104,11 +158,11 @@ function slugVariations(title) {
     for (const fused of getFusedVariants(root)) {
       rest.add(fused);
       rest.add(fused + '-tv');
-      dubVariants.add(fused + '-dub'); // ← moved to dub bucket
+      dubVariants.add(fused + '-dub');
     }
-    dubVariants.add(root + '-dub');         // ← moved
-    dubVariants.add(root + '-sub');         // ← moved
-    dubVariants.add(root + '-english-dub'); // ← moved
+    dubVariants.add(root + '-dub');
+    dubVariants.add(root + '-sub');
+    dubVariants.add(root + '-english-dub');
     rest.add(root + '-ova');
     rest.add(root + '-ona');
     const stripped = root
@@ -127,7 +181,6 @@ function slugVariations(title) {
   for (const s of rest) {
     if (!seen.has(s)) { seen.add(s); all.push(s); }
   }
-  // Append dub variants at the END so they only match if nothing else does
   for (const s of dubVariants) {
     if (!seen.has(s)) { seen.add(s); all.push(s); }
   }
@@ -212,10 +265,9 @@ async function search123Slug(titles) {
   const asciiTitles = titles.filter(t => t && !/[^\x00-\x7F]/.test(t));
 
   for (const title of asciiTitles) {
-    // ── Priority pass: non-dub slugs only ──────────────────────────────────
     const allVariants = slugVariations(title);
     const nonDubVariants = allVariants.filter(s => !isDubSlug(s));
-    
+
     const slug = await checkSlugsBatch(nonDubVariants, 8);
     if (slug) {
       console.log(`[123animes] Direct slug hit: "${slug}" (from "${title}")`);
@@ -223,7 +275,6 @@ async function search123Slug(titles) {
     }
   }
 
-  // ── Fallback: search page (also exclude dub results) ─────────────────────
   for (const title of asciiTitles) {
     try {
       const { data } = await http.get(`${BASE}/?s=${encodeURIComponent(title)}`, {
@@ -238,7 +289,7 @@ async function search123Slug(titles) {
         if (!m) return;
         const slug = m[1];
         if (['list', 'filter', 'search'].includes(slug) || slug.length < 2) return;
-        if (isDubSlug(slug)) return; // ← skip dub slugs from search results
+        if (isDubSlug(slug)) return;
         const text = $(el).text().trim();
         if (!allAnimeLinks.has(slug)) allAnimeLinks.set(slug, text);
       });
@@ -280,7 +331,6 @@ function isDubSlug(slug) {
   return DUB_SUFFIXES.some(suffix => slug.endsWith(suffix));
 }
 
-
 async function findDubSlug(mainSlug) {
   const results = await Promise.all(
     DUB_SUFFIXES.map(async (suffix) => {
@@ -320,7 +370,7 @@ async function fetchEpisodeList(slug) {
         slug:      epSlug,
         episodeId: `${epSlug}/episode/${epNum}`,
         url:       href ? `${BASE}${href}` : '',
-        m3u8:      `https://hlsx3cdn.echovideo.to/${epSlug}/${epNum}/master.m3u8`,
+        m3u8:      `${CDN}/${epSlug}/${epNum}/master.m3u8`,
         isFirst:   liId === 'str',
         isLast:    liId === 'end',
       });
@@ -456,14 +506,14 @@ async function scrapeRecentPage(type, page = 1) {
 
     if (!slug) return;
     items.push({
-  slug,
-  title,
-  cover:         cover.startsWith('/') ? BASE + cover : cover,
-  latestEpisode: epNum,
-  episodeId:     epNum != null ? `${slug}/episode/${epNum}` : null,
-  status,
-  url:           `${BASE}/anime/${slug}`,
-});
+      slug,
+      title,
+      cover:         cover.startsWith('/') ? BASE + cover : cover,
+      latestEpisode: epNum,
+      episodeId:     epNum != null ? `${slug}/episode/${epNum}` : null,
+      status,
+      url:           `${BASE}/anime/${slug}`,
+    });
   });
 
   let totalPages = null;
@@ -496,12 +546,12 @@ router.get('/', (req, res) => {
         details: 'fetch by 123animes slug directly',
         example: '/anime/123anime/slug/naruto'
       },
-     {
-  method: 'GET',
-  path: '/watch/:slug/episode/:episode',
-  details: 'get M3U8 stream URLs',
-  example: '/anime/123anime/watch/naruto/episode/1'
-},
+      {
+        method: 'GET',
+        path: '/watch/:slug/episode/:episode',
+        details: 'get M3U8 stream URLs',
+        example: '/anime/123anime/watch/naruto/episode/1'
+      },
       {
         method: 'GET',
         path: '/anime/123anime/recent/:type?page=N',
@@ -604,21 +654,69 @@ router.get('/slug/:slug', async (req, res) => {
   }
 });
 
-// GET /anime/123animes/watch/:slug/:episode
+
+router.get('/debug-stream/:slug/episode/:episode', async (req, res) => {
+  const { slug, episode } = req.params;
+  const masterUrl = `${CDN}/${slug}/${episode}/master.m3u8`;
+
+  try {
+    const master = await http.get(masterUrl, {
+      headers: { ...CDN_HEADERS, 'Accept-Encoding': 'gzip, deflate' },
+      decompress: true,
+    });
+
+    const masterText = master.data;
+    const result = { masterUrl, masterRaw: masterText, qualities: [] };
+
+    // Find all child playlist URLs
+    const lines = masterText.split('\n').map(l => l.trim()).filter(Boolean);
+    let meta = {};
+    for (const line of lines) {
+      if (line.startsWith('#EXT-X-STREAM-INF')) {
+        meta = line;
+      } else if (!line.startsWith('#') && meta) {
+        const qualityUrl = line.startsWith('http') ? line : new URL(line, masterUrl).href;
+        try {
+          const qualityM3u8 = await http.get(qualityUrl, {
+            headers: { ...CDN_HEADERS, 'Accept-Encoding': 'gzip, deflate' },
+            decompress: true,
+          });
+          result.qualities.push({
+            url: qualityUrl,
+            raw: qualityM3u8.data,
+            status: qualityM3u8.status,
+          });
+        } catch (e) {
+          result.qualities.push({ url: qualityUrl, error: e.message });
+        }
+        meta = {};
+      }
+    }
+
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /anime/123animes/watch/:slug/episode/:episode
 router.get('/watch/:slug/episode/:episode', async (req, res) => {
   const { slug, episode } = req.params;
+  const m3u8Url = `${CDN}/${slug}/${episode}/master.m3u8`;
 
   try {
     const [m3u8Response, anilistId] = await Promise.all([
-      http.get(`https://hlsx3cdn.echovideo.to/${slug}/${episode}/master.m3u8`, {
-        headers: { Referer: `${BASE}/anime/${slug}/episode/${episode}`, Origin: 'https://hlsx3cdn.echovideo.to' },
+      http.get(m3u8Url, {
+        headers:        { ...CDN_HEADERS, 'Accept-Encoding': 'gzip, deflate' },
+        decompress:     true,
       }),
       resolveAnilistIdFromSlug(slug),
     ]);
 
-    const lines = m3u8Response.data.split('\n').map((l) => l.trim()).filter(Boolean);
+    const lines   = m3u8Response.data.split('\n').map(l => l.trim()).filter(Boolean);
     const streams = [];
     let meta = {};
+
     for (const line of lines) {
       if (line.startsWith('#EXT-X-STREAM-INF')) {
         const attrs = {};
@@ -627,18 +725,24 @@ router.get('/watch/:slug/episode/:episode', async (req, res) => {
         while ((m = re.exec(line)) !== null) attrs[m[1]] = m[3] ?? m[4];
         meta = attrs;
       } else if (!line.startsWith('#') && meta.BANDWIDTH) {
-        streams.push({ ...meta, url: line.startsWith('http') ? line : new URL(line, `https://hlsx3cdn.echovideo.to/${slug}/${episode}/master.m3u8`).href });
+        const absolute = line.startsWith('http') ? line : new URL(line, m3u8Url).href;
+        streams.push({
+          ...meta,
+          url:      absolute,
+          proxyUrl: makeProxyUrl(req, absolute), // ✅ absolute proxy URL
+        });
         meta = {};
       }
     }
 
     res.json({
-      success: true,
+      success:     true,
       slug,
       episode:     parseInt(episode, 10),
       episodeId:   `${slug}/episode/${episode}`,
-      anilistId,                              // ← auto-resolved, null if not found
-      source:      `https://hlsx3cdn.echovideo.to/${slug}/${episode}/master.m3u8`,
+      anilistId,
+      source:      m3u8Url,
+      proxySource: makeProxyUrl(req, m3u8Url), // ✅ absolute proxy URL
       streamCount: streams.length,
       streams,
     });
@@ -646,6 +750,82 @@ router.get('/watch/:slug/episode/:episode', async (req, res) => {
     res.status(500).json({ success: false, slug, episode, error: err.message });
   }
 });
+
+
+
+router.get('/proxy', async (req, res) => {
+  const { url } = req.query;
+  if (!url) return res.status(400).json({ error: 'Missing ?url=' });
+  if (!isCdnUrl(url)) return res.status(403).json({ error: 'URL not allowed' });
+
+  try {
+    const upstream = await http.get(url, {
+      responseType:   'stream', // ✅ stream instead of arraybuffer
+      decompress:     true,
+      headers: {
+        ...CDN_HEADERS,
+        'Accept-Encoding': 'gzip, deflate',
+      },
+      validateStatus: () => true,
+    });
+
+    const contentType = upstream.headers['content-type'] || '';
+    const isM3U8 = contentType.includes('mpegurl') || url.includes('.m3u8');
+
+    res.set('Access-Control-Allow-Origin', '*');
+    res.set('Access-Control-Allow-Headers', '*');
+
+    if (upstream.status < 200 || upstream.status >= 300) {
+      res.status(upstream.status);
+      return upstream.data.pipe(res);
+    }
+
+    if (isM3U8) {
+      // M3U8 must be buffered to rewrite URLs — it's tiny so fine
+      const chunks = [];
+      upstream.data.on('data', chunk => chunks.push(chunk));
+      upstream.data.on('end', () => {
+        const text      = Buffer.concat(chunks).toString('utf-8');
+        const baseUrl   = url.substring(0, url.lastIndexOf('/') + 1);
+        const rewritten = rewriteM3U8(text, baseUrl, req);
+        res.set('Content-Type', 'application/vnd.apple.mpegurl');
+        res.set('Cache-Control', 'public, max-age=300');
+        res.send(rewritten);
+      });
+      upstream.data.on('error', err => {
+        console.error('[proxy] stream error:', err.message);
+        if (!res.headersSent) res.status(502).json({ error: err.message });
+      });
+    } else {
+      // ✅ TS segments piped directly — no buffering, instant start
+      res.set('Content-Type', contentType || 'video/mp2t');
+      res.set('Cache-Control', 'public, max-age=3600');
+      if (upstream.headers['content-length']) {
+        res.set('Content-Length', upstream.headers['content-length']);
+      }
+      upstream.data.pipe(res);
+      upstream.data.on('error', err => {
+        console.error('[proxy] pipe error:', err.message);
+        if (!res.headersSent) res.status(502).json({ error: err.message });
+      });
+    }
+
+  } catch (err) {
+    console.error('[proxy] error:', err.message, err.code);
+    if (!res.headersSent) {
+      res.status(502).json({ error: err.message, code: err.code });
+    }
+  }
+});
+
+router.options('/proxy', (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Headers', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.sendStatus(204);
+});
+
+
 
 // GET /anime/123animes/recent/:type?page=N
 router.get('/recent/:type', async (req, res) => {
